@@ -405,7 +405,7 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len, result_cutoff, ref
     
     ################### 结果注释 ########################
     anno_df = None
-    if annotate:
+    if annotate in ["True", "true"]:
         annotation_multi(df, reference, ensembl_input, ensembl_output, vep, vep_setting)
         anno_df = anno_result_to_filter(ensembl_output, transcript)
         df["MatchKey"] = df["chrom"].astype(str) + "-" + df["pos"].astype(str)
@@ -421,7 +421,7 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len, result_cutoff, ref
     ####################################################
 
     # 清理
-    if rm_tmp:
+    if rm_tmp in ["False", "false"]:
         shutil.rmtree(tmp_dir)
 
 def main():
@@ -436,11 +436,11 @@ def main():
     parser.add_argument("-i", "--input", type=str, help="input bam file")
     parser.add_argument("-o", "--output", type=str, help="output path")
     parser.add_argument("-f", "--ref", type=str, help="reference fasta")
-    parser.add_argument("-a", "--anno", type=bool, help="annotation, default=True", default=True)
+    parser.add_argument("-a", "--anno", type=str, help="annotation, default=True", default="True")
     parser.add_argument("-s", "--sr", type=int, help="breakpoint support reads cutoff, default=10", default=10)
     parser.add_argument("-l", "--length", type=int, help="min softclip length, default=36", default=36)
     parser.add_argument("-r", "--cutoff", type=int, help="insertion support reads cutoff, default=5", default=5)
-    parser.add_argument("-t", "--rm_tmp", type=bool, help="remove tmp file, default=False", default=False)
+    parser.add_argument("-t", "--rm_tmp", type=str, help="remove tmp file, default=False", default="False")
     parser.add_argument("-c", "--config", type=str, help="config file, default=base_dir/config.ini", default="AUTO_DETECT")
     if len(sys.argv[1:]) == 0:
         parser.print_help()
