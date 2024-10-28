@@ -3,6 +3,7 @@
 # 20241015
 # WES转座子插入突变分析流程
 # 可分析Alu LINE-1 SVA HERV
+# version 20241028 修复检出为空时的bug
 # version 20241017 配置文件版
 # version 20241016 初始版本
 
@@ -185,7 +186,7 @@ def split_breakpoint_2_fastq(df, input_bam, tmp_dir):
 # 比对TE库
 # https://hgdownload.soe.ucsc.edu/hubs/RepeatBrowser2020/hg38reps/hg38reps.fa
 def TE_mapping(row, te_reference, tmp_dir, bwa):
-    row["mapping_dict"] = {}
+    # row = row.assign(mapping_dict={})
     row["te_dict"] = {"SVA": 0, "L1": 0, "Alu": 0, "HERV": 0}
     chrom = row['chrom']
     pos = row['pos']
@@ -211,6 +212,8 @@ def TE_mapping(row, te_reference, tmp_dir, bwa):
 
 # 进一步过滤提升效率，仅保留比对到转座子基因的行
 def mapping_filter(input_df):
+    if input_df.empty:
+        return pd.DataFrame(columns=["chrom", "pos", "reads", "mapping_dict", "te_dict"])
     output_df = input_df[input_df['mapping_dict'].apply(lambda x: len(x) > 0)]
     output_df = output_df[["chrom", "pos", "reads", "mapping_dict", "te_dict"]]
     return output_df
@@ -321,9 +324,13 @@ def anno_result_to_filter(input_file, transcript_db):
             data["HGVSc"].append(HGVSc)
             data["HGVSg"].append(HGVSg)
     df = pd.DataFrame(data)
-    df[["chrom", "pos"]] = df["Location"].str.split(":", expand=True)
-    df["MatchKey"] = df["chrom"] + "-" + df["pos"]
-    df.drop(["Location", "chrom", "pos"], axis=1, inplace=True)
+    if df.empty:
+        df["MatchKey"] = "-"
+        df.drop(["Location"], axis=1, inplace=True)
+    else:
+        df[["chrom", "pos"]] = df["Location"].str.split(":", expand=True)
+        df["MatchKey"] = df["chrom"] + "-" + df["pos"]
+        df.drop(["Location", "chrom", "pos"], axis=1, inplace=True)
     return df
 
 # 处理结果df
@@ -396,6 +403,7 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len, result_cutoff, ref
     os.system(cmd)
     df = get_breakpoint_df(output_bam, sup_read)
     split_breakpoint_2_fastq(df, output_bam, tmp_dir)
+    df['mapping_dict'] = [{} for _ in range(len(df))]
     df = df.apply(lambda x: TE_mapping(x, te_genome, tmp_dir, bwa), axis=1)
     ####################################################
     
@@ -431,7 +439,7 @@ def main():
         usage="python3 TE_analysis.py [-h] -p sample_id -i input_bam -o output_dir",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("-v", "--version", action="version", version="Version 0.2 20241017")
+    parser.add_argument("-v", "--version", action="version", version="Version 0.3 20241028")
     parser.add_argument("-p", "--prefix", type=str, help="sample prefix")
     parser.add_argument("-i", "--input", type=str, help="input bam file")
     parser.add_argument("-o", "--output", type=str, help="output path")
