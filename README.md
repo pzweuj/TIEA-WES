@@ -2,22 +2,17 @@
 
 ## Overview
 
-Transposon Insertion Event Analyzer for Whole Exome Sequencing data (TIEA-WES) is a  tool designed to detect transposon insertion events from next-generation sequencing (NGS) data generated through probe-captured Whole Exome Sequencing (WES). The software is optimized to identify insertions of Alu, LINE-1 (L1), SVA, and HERV elements with high efficiency. 
+Transposon Insertion Event Analyzer for Whole Exome Sequencing data (TIEA-WES) is a tool designed to detect transposon insertion events from next-generation sequencing data generated through probe-captured Whole Exome Sequencing (WES). The software is optimized to identify insertions of Alu, LINE-1 (L1), SVA, and HERV elements with high efficiency.
 
 ## Requirements
-
-To use TIEA-WES, you need to have the following software installed:
 
 - Python 3.x
 - pandas
 - pysam
 - BWA
 - Samtools
-- VEP (Optional)
 
 ## Installation
-
-Clone the repository:
 
 ```bash
 git clone https://github.com/pzweuj/TIEA-WES.git
@@ -25,57 +20,97 @@ git clone https://github.com/pzweuj/TIEA-WES.git
 
 ## Databases
 
-Before running TIEA-WES, you need to prepare the  transposon genome. Follow these steps:
+Prepare the transposon genome reference:
 
 ```bash
 wget https://hgdownload.soe.ucsc.edu/hubs/RepeatBrowser2020/hg38reps/hg38reps.fa
-# index the fasta
 bwa index hg38reps.fa
 ```
 
-To ensure consistent naming across different datasets, prepare a mapping table that correlates different transcript names or identifiers used in various sources. 
-Here is an example of how to create a transcript name mapping table.
+## Configuration
 
-```bash
-wget https://github.com/pzweuj/TIEA-WES/raw/refs/heads/main/data/Transcript_20240226.xlsx
+Edit `config.ini`:
+
+```ini
+[software]
+BWA = bwa
+SAMTOOLS = samtools
+
+[database]
+TE_GENOME = hg38reps.fa
 ```
 
 ## Usage
-
-### Modifying the Configuration File
-
-[Example](https://github.com/pzweuj/TIEA-WES/blob/main/config.ini)
-
-```config
-[software]
-BWA = 
-SAMTOOLS = 
-VEP = 
-
-[database]
-TE_GENOME = 
-TRANSCRIPT = 
-
-[vep_setting]
-SINGULARITY = 
-IMAGE = 
-VEP_DB = 
-VEP_OPTION = 
-```
-
-### Run the python script
 
 ```bash
 python TIEA-WES.py -h
 ```
 
-To run TIEA-WES on your dataset, execute the following command:
+### Basic usage
 
 ```bash
-python TIEA-WES.py -p <sample id> -i <sample.bam> -o <output dir> -f <ref.fa> 
+python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir> -f <ref.fa>
+```
+
+### Output VCF format
+
+```bash
+python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir> -f <ref.fa> --vcf
+```
+
+### Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `-p` | Sample prefix/identifier | Required |
+| `-i` | Input BAM file | Required |
+| `-o` | Output directory | Required |
+| `-f` | Reference FASTA (for VCF header) | Required |
+| `-s` | Minimum breakpoint support reads | 10 |
+| `-l` | Minimum softclip length | 36 |
+| `-t` | Keep temporary files | False |
+| `-c` | Config file path | Auto-detect |
+| `--vcf` | Output VCF format | False |
+
+## Output
+
+### TSV format (default)
+
+Output file: `<prefix>.te.result.txt`
+
+| Column | Description |
+|--------|-------------|
+| chrom | Chromosome |
+| pos | Breakpoint position |
+| reads | Supporting softclip reads count |
+| mapping_dict | TE mapping details (e.g., `{AluY:10, L1HS:3}`) |
+| te_dict | TE type summary (e.g., `{Alu:10, L1:3, SVA:0, HERV:0}`) |
+
+### VCF format (--vcf)
+
+Output file: `<prefix>.te.result.vcf`
+
+VCF follows standard format with symbolic alleles:
+- `<INS:ME:ALU>` - Alu insertion
+- `<INS:ME:LINE1>` - LINE-1 insertion
+- `<INS:ME:SVA>` - SVA insertion
+- `<INS:ME:HERV>` - HERV insertion
+
+INFO fields:
+- `SVTYPE=INS` - Structural variant type
+- `SVLEN=.` - Length (unknown)
+- `MINAME` - Mobile element type
+- `SUPPORT` - Supporting reads count
+- `MAPPING` - Detailed mapping info
+
+## Downstream Annotation
+
+VEP annotation can be performed on the VCF output:
+
+```bash
+vep -i sample.te.result.vcf -o sample.annotated.vcf --cache --offline
 ```
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](https://github.com/pzweuj/TIEA-WES/blob/main/LICENSE) file for details.
-
+GNU General Public License v3.0
