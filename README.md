@@ -111,6 +111,29 @@ VEP annotation can be performed on the VCF output:
 vep -i sample.te.result.vcf -o sample.annotated.vcf --cache --offline
 ```
 
+## Roadmap
+
+### v0.5 - Parallel TE Mapping (Planned)
+
+Current bottleneck: BWA alignment runs serially for each breakpoint.
+
+Planned optimization using `multiprocessing.Pool`:
+
+```python
+from multiprocessing import Pool
+
+def te_mapping_worker(row_dict, te_reference, tmp_dir, bwa):
+    # Parallel worker function
+    ...
+
+with Pool(n_threads) as pool:
+    results = pool.map(worker_func, row_dicts)
+```
+
+Expected improvement: **2-4x speedup** for TE mapping step.
+
+New parameter: `--threads N` to specify parallel workers.
+
 ## License
 
 GNU General Public License v3.0
