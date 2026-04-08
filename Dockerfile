@@ -15,7 +15,6 @@ ENV TZ=Asia/Shanghai
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bwa \
-    samtools \
     wget \
     curl \
     git \
@@ -25,7 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Python dependencies
 RUN pip install --no-cache-dir \
     pandas>=1.3.0 \
-    pysam>=0.19.0
+    pysam>=0.19.0 \
+    pyfaidx>=0.7.0
 
 # Create working directories
 WORKDIR /app

@@ -24,6 +24,12 @@ import configparser
 from datetime import datetime
 from multiprocessing import Pool, cpu_count
 
+try:
+    import pyfaidx
+    HAS_PYFAIDX = True
+except ImportError:
+    HAS_PYFAIDX = False
+
 # 常量定义
 MIN_SOFTCLIP_LENGTH = 36
 MIN_CIGAR_OPERATIONS = 2
@@ -32,7 +38,7 @@ CLUSTER_WINDOW = 10
 VALID_CHROMOSOMES = (
     [f"chr{i}" for i in range(1, 23)] +
     [str(i) for i in range(1, 23)] +
-    ["chrX", "chrY", "X", "Y"]
+    ["chrX", "chrY", "X", "Y", "chrM", "MT"]
 )
 
 # VCF头部模板
@@ -67,6 +73,34 @@ def get_abs_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_reference_from_fasta(fasta_path):
+    """
+    从FASTA文件路径提取参考基因组名称
+
+    例如：
+    /path/to/hg19.fa -> hg19
+    /path/to/GRCh38.primary_assembly.genome.fa -> GRCh38
+    """
+    if not fasta_path:
+        return None
+
+    basename = os.path.basename(fasta_path)
+    name = basename.split('.')[0]  # 去除扩展名
+
+    # 常见命名规范化
+    name_lower = name.lower()
+    if 'hg19' in name_lower or 'grch37' in name_lower:
+        if 'hg19' in name_lower:
+            return 'hg19'
+        return 'GRCh37'
+    elif 'hg38' in name_lower or 'grch38' in name_lower:
+        if 'hg38' in name_lower:
+            return 'hg38'
+        return 'GRCh38'
+
+    return name
+
+
 def get_reference_from_bam(bam_file):
     """
     从BAM header提取参考基因组信息
@@ -74,7 +108,7 @@ def get_reference_from_bam(bam_file):
     优先级：
     1. @SQ 行的 AS 字段（assembly name，如 hg38, GRCh37）
     2. @SQ 行的 UR 字段（URI/path）
-    3. 返回 'unknown' 并提示用户使用 -f 指定
+    3. 根据特征序列名/长度推断
 
     返回: reference name string
     """
@@ -90,11 +124,49 @@ def get_reference_from_bam(bam_file):
         for sq_line in header.get('SQ', []):
             if 'UR' in sq_line:
                 ur = sq_line['UR']
-                # 提取文件名作为参考名
                 if ur:
                     return ur
 
-        # 无法确定，返回 unknown
+        # 方法3: 根据特征序列名推断
+        sn_list = [sq.get('SN', '') for sq in header.get('SQ', [])]
+
+        # 检查 hs37d5 (GRCh37+decoy)
+        if 'hs37d5' in sn_list:
+            return 'GRCh37'
+
+        # 检查 hs38d1 (GRCh38+decoy)
+        if 'hs38d1' in sn_list or 'hs38DH' in sn_list:
+            return 'GRCh38'
+
+        # 检查染色体命名风格
+        has_chr_prefix = any(sn.startswith('chr') for sn in sn_list if sn)
+        has_MT = 'MT' in sn_list
+        has_chrM = 'chrM' in sn_list
+
+        # 根据第一个常染色体的长度判断
+        # GRCh37: chr1 = 249250621
+        # GRCh38: chr1 = 248956422
+        chr1_len = None
+        for sq in header.get('SQ', []):
+            sn = sq.get('SN', '')
+            if sn in ['1', 'chr1']:
+                chr1_len = sq.get('LN', 0)
+                break
+
+        if chr1_len:
+            # GRCh37 chr1 长度约 249M
+            # GRCh38 chr1 长度约 248M
+            if chr1_len > 249000000:
+                if has_chr_prefix:
+                    return 'hg19'
+                else:
+                    return 'GRCh37'
+            elif chr1_len < 249000000:
+                if has_chr_prefix:
+                    return 'hg38'
+                else:
+                    return 'GRCh38'
+
         return 'unknown'
 
 
@@ -111,23 +183,20 @@ def get_reference_info(bam_file):
         sn_list = [sq.get('SN', '') for sq in header.get('SQ', [])]
         has_chr_prefix = any(sn.startswith('chr') for sn in sn_list if sn)
 
-        # 获取 AS 字段
-        as_field = None
-        for sq_line in header.get('SQ', []):
-            if 'AS' in sq_line:
-                as_field = sq_line['AS']
-                break
+        # 获取参考基因组名称
+        reference = get_reference_from_bam(bam_file)
 
         # 生成建议
-        if as_field:
-            suggestion = f"Detected '{as_field}' from BAM header"
-            reference = as_field
-        elif has_chr_prefix:
-            suggestion = "Reference has 'chr' prefix. Could be hg19 (GRCh37) or hg38 (GRCh38). Use -f to specify."
-            reference = 'unknown'
+        if reference != 'unknown':
+            if has_chr_prefix:
+                suggestion = f"Detected '{reference}' (with chr prefix)"
+            else:
+                suggestion = f"Detected '{reference}' (no chr prefix)"
         else:
-            suggestion = "Reference has no 'chr' prefix. Could be GRCh37 or GRCh38. Use -f to specify."
-            reference = 'unknown'
+            if has_chr_prefix:
+                suggestion = "Reference has 'chr' prefix. Could be hg19 (GRCh37) or hg38 (GRCh38)."
+            else:
+                suggestion = "Reference has no 'chr' prefix. Could be GRCh37 or GRCh38."
 
         return reference, has_chr_prefix, suggestion
 
@@ -248,29 +317,68 @@ def process_bam_once(input_bam, sup_read, min_len, min_mapq, tmp_dir):
     替代原来的 Step 1 + Step 2 + Step 3
     """
     breakpoint_counts = {}  # {(chrom, pos, direction): {"reads": 0, "reads_name": set(), "softclip_len": []}}
-    read_to_breakpoints = {}  # {read_name: [(chrom, pos, direction, softclip_len)]}
 
     combined_fastq = os.path.join(tmp_dir, "combined_breakpoints.fastq")
 
-    processed_reads = 0
     total_reads = 0
+    passed_mapq = 0
+    passed_cigar = 0
+    passed_softclip = 0
+    fastq_records = 0
 
     with pysam.AlignmentFile(input_bam, "rb") as bamfile:
-        total_reads = bamfile.count() if hasattr(bamfile, 'count') else 0
-
         with open(combined_fastq, 'w') as fq_out:
             for read in bamfile:
                 total_reads += 1
-                is_valid, has_5prime, has_3prime = process_read_check(read, min_len, min_mapq)
 
-                if not is_valid:
+                # 检查 MAPQ
+                if read.is_duplicate or read.is_supplementary:
                     continue
 
-                processed_reads += 1
+                if read.mapping_quality < min_mapq:
+                    continue
+                passed_mapq += 1
+
+                # 检查 CIGAR
+                cigar = read.cigartuples
+                if cigar is None:
+                    continue
+
+                if len(cigar) != MIN_CIGAR_OPERATIONS:
+                    continue
+
+                # 检查只包含 M 和 S
+                valid_cigar = True
+                for op in cigar:
+                    if op[0] not in [0, 4]:
+                        valid_cigar = False
+                        break
+                    if op[1] < min_len:
+                        valid_cigar = False
+                        break
+
+                if not valid_cigar:
+                    continue
+                passed_cigar += 1
+
+                # 判断 softclip 方向
+                has_5prime = cigar[0][0] == 4
+                has_3prime = cigar[-1][0] == 4
+
+                if not has_5prime and not has_3prime:
+                    continue
+                passed_softclip += 1
 
                 # 提取断点
                 breakpoints = get_breakpoints_birectional(read, has_5prime, has_3prime)
 
+                if not breakpoints:
+                    continue
+
+                # 提取softclip序列
+                softclip_parts = get_softclip_sequence(read, has_5prime, has_3prime)
+
+                # 处理每个断点
                 for chrom, pos, direction, read_name, softclip_len in breakpoints:
                     key = (chrom, pos, direction)
 
@@ -285,26 +393,20 @@ def process_bam_once(input_bam, sup_read, min_len, min_mapq, tmp_dir):
                     breakpoint_counts[key]["reads_name"].add(read_name)
                     breakpoint_counts[key]["softclip_lens"].append(softclip_len)
 
-                    # 记录read对应的断点
-                    if read_name not in read_to_breakpoints:
-                        read_to_breakpoints[read_name] = []
-                    read_to_breakpoints[read_name].append((chrom, pos, direction, softclip_len))
-
-                # 提取softclip序列并写入FASTQ
-                softclip_parts = get_softclip_sequence(read, has_5prime, has_3prime)
-
-                for seq, quals, direction in softclip_parts:
-                    # 找到该方向对应的断点
-                    for bp_info in read_to_breakpoints.get(read.query_name, []):
-                        bp_chrom, bp_pos, bp_dir, bp_len = bp_info
-                        if bp_dir == direction:
-                            # read name格式: {original_name}@{chrom}_{pos}_{direction}
-                            modified_name = f"{read.query_name}@{bp_chrom}_{bp_pos}_{bp_dir}"
+                    # 写入FASTQ - 找到对应方向的softclip序列
+                    for seq, quals, sc_dir in softclip_parts:
+                        if sc_dir == direction:
+                            modified_name = f"{read_name}@{chrom}_{pos}_{direction}"
                             fq_out.write(f"@{modified_name}\n{seq}\n+\n")
                             fq_out.write("".join(chr(q + 33) for q in quals) + "\n")
+                            fastq_records += 1
                             break
 
-    print(f"  Processed {processed_reads} valid softclip reads from input BAM")
+    print(f"  Total reads scanned: {total_reads}")
+    print(f"  Reads passed MAPQ>={min_mapq}: {passed_mapq}")
+    print(f"  Reads passed CIGAR check: {passed_cigar}")
+    print(f"  Reads with valid softclip: {passed_softclip}")
+    print(f"  FASTQ records written: {fastq_records}")
 
     # 转换为DataFrame并筛选
     if not breakpoint_counts:
@@ -626,7 +728,7 @@ def run_bwa_alignment(bwa, te_reference, fastq, sam, threads=2):
     try:
         result = subprocess.run(
             [bwa, "mem", "-t", str(threads), te_reference, fastq],
-            capture_output=True, text=True, check=True
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
         )
         with open(sam, 'w') as f:
             f.write(result.stdout)
@@ -680,7 +782,7 @@ def batch_te_mapping(combined_fastq, te_reference, tmp_dir, bwa, threads=4):
     try:
         result = subprocess.run(
             [bwa, "mem", "-t", str(threads), te_reference, combined_fastq],
-            capture_output=True, text=True, check=True
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
         )
         # 直接解析stdout，不写SAM文件
         breakpoint_stats = parse_bwa_stdout_piped(result.stdout)
@@ -720,13 +822,12 @@ def _te_mapping_worker(row_dict):
     try:
         subprocess.run(
             [_parallel_bwa, "mem", "-t", "1", _parallel_te_reference, fastq],
-            capture_output=True, text=True, check=True
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True
         )
         with open(sam, 'w') as f:
             subprocess.run(
                 [_parallel_bwa, "mem", "-t", "1", _parallel_te_reference, fastq],
-                capture_output=True, text=True, check=True,
-                stdout=f
+                stdout=f, stderr=subprocess.PIPE, universal_newlines=True, check=True
             )
     except subprocess.CalledProcessError:
         with open(sam, 'w') as f:
@@ -928,7 +1029,37 @@ def generate_vcf_header(reference):
     )
 
 
-def generate_vcf_record(row, sample_id):
+def get_ref_base(fasta_handler, chrom, pos):
+    """
+    从参考基因组获取指定位置的碱基
+
+    Args:
+        fasta_handler: pyfaidx.Fasta 对象或 None
+        chrom: 染色体名
+        pos: 位置 (1-based)
+
+    Returns:
+        碱基字符，如果无法获取则返回 'N'
+    """
+    if fasta_handler is None:
+        return 'N'
+
+    try:
+        # pyfaidx 使用 1-based 坐标
+        # 处理染色体命名差异
+        ref_chrom = chrom
+
+        # 尝试原始名称
+        if ref_chrom in fasta_handler:
+            seq = fasta_handler[ref_chrom][pos-1:pos]
+            return str(seq).upper()
+        else:
+            return 'N'
+    except Exception:
+        return 'N'
+
+
+def generate_vcf_record(row, sample_id, fasta_handler=None):
     """生成单条VCF记录"""
     chrom = row['chrom']
     pos = row['pos']
@@ -948,6 +1079,9 @@ def generate_vcf_record(row, sample_id):
         'HERV': '<INS:ME:HERV>'
     }
     alt = te_to_alt.get(te_type, '<INS:ME:UNKNOWN>')
+
+    # 获取参考碱基
+    ref = get_ref_base(fasta_handler, chrom, pos)
 
     info_parts = [
         f"SVTYPE=INS",
@@ -982,7 +1116,6 @@ def generate_vcf_record(row, sample_id):
         info_parts.append(f"TECOUNT={te_str}")
 
     record_id = f"{sample_id}_MEI_{chrom}_{pos}_{direction}"
-    ref = "N"
     qual = "."
     filt = "PASS" if reads >= 10 else "LowSupport"
 
@@ -998,32 +1131,78 @@ def generate_vcf_record(row, sample_id):
     return f"{chrom}\t{pos}\t{record_id}\t{ref}\t{alt}\t{qual}\t{filt}\t{info}"
 
 
-def write_vcf_output(df, output_path, sample_id, reference):
+def natural_sort_key(chrom):
+    """
+    自然排序key函数，让染色体按 1,2,3...10,11...X,Y 排序
+    而不是字符串排序 1,10,11,2,3...
+    """
+    # 去除chr前缀
+    chrom_clean = chrom.replace('chr', '')
+
+    # 定义排序顺序
+    order = {'X': 23, 'Y': 24, 'M': 25, 'MT': 25}
+
+    if chrom_clean in order:
+        return order[chrom_clean]
+    else:
+        try:
+            return int(chrom_clean)
+        except ValueError:
+            return 999  # 未知染色体放最后
+
+
+def write_vcf_output(df, output_path, sample_id, reference, fasta_handler=None):
     """写入VCF文件"""
     with open(output_path, 'w', encoding='utf-8') as vcf_file:
         header = generate_vcf_header(reference)
         vcf_file.write(header)
 
-        df_sorted = df.sort_values(['chrom', 'pos'])
+        # 自然排序
+        df_sorted = df.copy()
+        df_sorted['_sort_key'] = df_sorted['chrom'].apply(natural_sort_key)
+        df_sorted = df_sorted.sort_values(['_sort_key', 'pos'])
+        df_sorted = df_sorted.drop(columns=['_sort_key'])
 
         for idx, row in df_sorted.iterrows():
-            record = generate_vcf_record(row, sample_id)
+            record = generate_vcf_record(row, sample_id, fasta_handler)
             vcf_file.write(record + "\n")
 
 
 # ========== 主流程 ==========
 
 def te_pipe(prefix, input_bam, output_dir, sup_read, min_len,
-            reference, rm_tmp, config_file, n_threads, min_mapq, cluster_window):
+            rm_tmp, config_file, n_threads, min_mapq, cluster_window, ref_fasta=None):
     """主分析流程（v2.0重构版本）"""
 
-    # 从BAM header获取参考基因组信息（如果未提供）
-    if reference is None:
+    # 确定参考基因组名称和加载FASTA
+    fasta_handler = None
+    reference = 'unknown'
+
+    if ref_fasta and os.path.exists(ref_fasta):
+        # 从FASTA文件名提取参考名称
+        reference = get_reference_from_fasta(ref_fasta)
+        print(f"Reference: {reference} (from {os.path.basename(ref_fasta)})")
+
+        # 加载FASTA获取REF碱基
+        if HAS_PYFAIDX:
+            try:
+                import pyfaidx
+                fasta_handler = pyfaidx.Fasta(ref_fasta)
+                print(f"Loaded reference FASTA for REF bases")
+            except Exception as e:
+                print(f"Warning: Could not load reference FASTA: {e}")
+                print("         REF bases will be 'N'")
+        else:
+            print("Warning: pyfaidx not installed. REF bases will be 'N'.")
+            print("         Install with: pip install pyfaidx")
+    else:
+        # 从BAM header获取参考基因组信息
         reference, has_chr, suggestion = get_reference_info(input_bam)
         print(f"Reference: {suggestion}")
         if reference == 'unknown':
-            print("WARNING: Could not determine reference genome from BAM header.")
-            print("         VCF header will use 'unknown'. Use -f to specify reference.")
+            print("         VCF header will use 'unknown'. Use -r to specify reference FASTA.")
+        if ref_fasta:
+            print(f"Warning: Reference FASTA not found: {ref_fasta}")
 
     # 加载配置
     if config_file == "AUTO_DETECT":
@@ -1050,7 +1229,7 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len,
     if df.empty:
         print("No breakpoints found after filtering.")
         empty_df = pd.DataFrame(columns=["chrom", "pos", "direction", "reads", "mapping_dict", "te_dict"])
-        write_vcf_output(empty_df, output_vcf, prefix, reference)
+        write_vcf_output(empty_df, output_vcf, prefix, reference, fasta_handler)
         print(f"VCF output: {output_vcf}")
         return
 
@@ -1064,7 +1243,7 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len,
     if df.empty:
         print("No breakpoints after clustering.")
         empty_df = pd.DataFrame(columns=["chrom", "pos", "direction", "reads", "mapping_dict", "te_dict"])
-        write_vcf_output(empty_df, output_vcf, prefix, reference)
+        write_vcf_output(empty_df, output_vcf, prefix, reference, fasta_handler)
         print(f"VCF output: {output_vcf}")
         return
 
@@ -1092,13 +1271,13 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len,
     if df.empty:
         print("No TE insertions detected.")
         empty_df = pd.DataFrame(columns=["chrom", "pos", "direction", "reads", "mapping_dict", "te_dict"])
-        write_vcf_output(empty_df, output_vcf, prefix, reference)
+        write_vcf_output(empty_df, output_vcf, prefix, reference, fasta_handler)
         print(f"VCF output: {output_vcf}")
         return
 
     # Step 5: 输出VCF
     print("Step 5: Writing VCF output...")
-    write_vcf_output(df, output_vcf, prefix, reference)
+    write_vcf_output(df, output_vcf, prefix, reference, fasta_handler)
     print(f"VCF output: {output_vcf}")
     print(f"Total TE insertions detected: {len(df)}")
 
@@ -1121,8 +1300,11 @@ def main():
                         help="Input BAM file path")
     parser.add_argument("-o", "--output", type=str, required=True,
                         help="Output directory path")
-    parser.add_argument("-f", "--ref", type=str, default=None,
-                        help="Reference FASTA file path (optional, auto-detected from BAM header if not provided)")
+    parser.add_argument("-r", "--ref_fasta", type=str, default=None,
+                        help="Reference genome FASTA file (optional)\n"
+                             "  - Provides real REF bases in VCF\n"
+                             "  - Sets reference name in VCF header\n"
+                             "  - Auto-detected from BAM header if not provided")
     parser.add_argument("-s", "--support_reads", type=int, default=10,
                         help="Minimum breakpoint support reads cutoff (default: 10)")
     parser.add_argument("-l", "--min_length", type=int, default=36,
@@ -1150,12 +1332,12 @@ def main():
         output_dir=args.output,
         sup_read=args.support_reads,
         min_len=args.min_length,
-        reference=args.ref,
         rm_tmp=args.keep_tmp,
         config_file=args.config,
         n_threads=args.threads,
         min_mapq=args.min_mapq,
-        cluster_window=args.cluster_window
+        cluster_window=args.cluster_window,
+        ref_fasta=args.ref_fasta
     )
 
 

@@ -19,11 +19,11 @@ Transposon Insertion Event Analyzer for Whole Exome Sequencing data (TIEA-WES) i
 
 ## Requirements
 
-- Python 3.x
+- Python 3.6+
 - pandas
 - pysam
 - BWA
-- Samtools
+- pyfaidx (optional, for real REF bases in VCF)
 
 ## Installation
 
@@ -90,6 +90,10 @@ docker build -t tiea-wes:2.0 .
 docker run --rm -v /path/to/data:/data tiea-wes:2.0 \
     python /app/TIEA-WES.py -p sample -i /data/sample.bam -o /data/output
 
+# With reference genome FASTA (for real REF bases and correct header)
+docker run --rm -v /path/to/data:/data -v /path/to/ref:/ref tiea-wes:2.0 \
+    python /app/TIEA-WES.py -p sample -i /data/sample.bam -o /data/output -r /ref/hg19.fa
+
 # With custom parameters
 docker run --rm -v /path/to/data:/data tiea-wes:2.0 \
     python /app/TIEA-WES.py \
@@ -129,7 +133,7 @@ python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir> -f <ref.fa>
 | `-p` | Sample prefix/identifier | Required |
 | `-i` | Input BAM file | Required |
 | `-o` | Output directory | Required |
-| `-f` | Reference FASTA (for VCF header) | Auto-detect from BAM |
+| `-r` | Reference genome FASTA file | None |
 | `-s` | Minimum breakpoint support reads | 10 |
 | `-l` | Minimum softclip length | 36 |
 | `-q` | Minimum mapping quality (MAPQ) | 20 |
@@ -137,6 +141,11 @@ python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir> -f <ref.fa>
 | `-t` | Keep temporary files | False |
 | `-c` | Config file path | Auto-detect |
 | `--threads` | Number of threads for BWA alignment | 4 |
+
+**The `-r` parameter:**
+- Provides real REF bases in VCF output
+- Sets reference name in VCF header (extracted from filename)
+- If not provided, REF will be 'N' and reference name is auto-detected from BAM header
 
 ## Algorithm Improvements (v2.0)
 
