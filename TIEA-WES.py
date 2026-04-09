@@ -2,7 +2,7 @@
 # pzw
 # WES转座子插入突变分析流程
 # 可分析Alu LINE-1 SVA HERV
-# version 2.0 - 全面重构：合并流程、管道解析、双向softclip、MAPQ过滤、断点聚类
+# version 2.0.1 - 添加CRAM格式支持
 
 """
 流程概述：
@@ -41,10 +41,54 @@ VALID_CHROMOSOMES = (
     ["chrX", "chrY", "X", "Y", "chrM", "MT"]
 )
 
+
+def detect_file_type(filepath):
+    """
+    检测输入文件类型（BAM或CRAM）
+
+    返回: "bam" 或 "cram"
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == ".cram":
+        return "cram"
+    elif ext == ".bam":
+        return "bam"
+    else:
+        # 尝试读取文件头判断
+        try:
+            with open(filepath, 'rb') as f:
+                header = f.read(4)
+                # BAM文件以"BAM\1"开头
+                if header == b'BAM\x01':
+                    return "bam"
+                # CRAM文件以"c"开头（CRAM magic number）
+                elif header[0:1] == b'c':
+                    return "cram"
+        except:
+            pass
+        # 默认假设为BAM
+        return "bam"
+
+
+def get_pysam_mode(filepath):
+    """
+    获取pysam读取模式
+
+    BAM: "rb" (read binary)
+    CRAM: "rc" (read cram)
+
+    返回: 模式字符串
+    """
+    file_type = detect_file_type(filepath)
+    if file_type == "cram":
+        return "rc"
+    else:
+        return "rb"
+
 # VCF头部模板
 VCF_HEADER_TEMPLATE = '''##fileformat=VCFv4.3
 ##fileDate={date}
-##source=TIEA-WES_v2.0.0
+##source=TIEA-WES_v2.0.1
 ##reference={reference}
 ##ALT=<ID=INS:ME:ALU,Description="Alu insertion">
 ##ALT=<ID=INS:ME:LINE1,Description="LINE-1 insertion">
@@ -101,9 +145,9 @@ def get_reference_from_fasta(fasta_path):
     return name
 
 
-def get_reference_from_bam(bam_file):
+def get_reference_from_bam(input_file):
     """
-    从BAM header提取参考基因组信息
+    从BAM/CRAM header提取参考基因组信息
 
     优先级：
     1. @SQ 行的 AS 字段（assembly name，如 hg38, GRCh37）
@@ -112,7 +156,8 @@ def get_reference_from_bam(bam_file):
 
     返回: reference name string
     """
-    with pysam.AlignmentFile(bam_file, "rb") as bamfile:
+    mode = get_pysam_mode(input_file)
+    with pysam.AlignmentFile(input_file, mode) as bamfile:
         header = bamfile.header
 
         # 方法1: 从 @SQ 的 AS 字段获取（最可靠）
@@ -170,13 +215,14 @@ def get_reference_from_bam(bam_file):
         return 'unknown'
 
 
-def get_reference_info(bam_file):
+def get_reference_info(input_file):
     """
     获取参考基因组详细信息用于提示用户
 
     返回: (reference, has_chr_prefix, suggestion)
     """
-    with pysam.AlignmentFile(bam_file, "rb") as bamfile:
+    mode = get_pysam_mode(input_file)
+    with pysam.AlignmentFile(input_file, mode) as bamfile:
         header = bamfile.header
 
         # 检查是否有 chr 前缀
@@ -308,9 +354,11 @@ def get_softclip_sequence(read, has_5prime, has_3prime):
     return softclip_parts
 
 
-def process_bam_once(input_bam, sup_read, min_len, min_mapq, tmp_dir):
+def process_bam_once(input_file, sup_read, min_len, min_mapq, tmp_dir):
     """
     一次遍历完成：筛选 + 统计断点 + 写FASTQ
+
+    支持 BAM 和 CRAM 格式
 
     返回: (breakpoint_df, combined_fastq_path)
 
@@ -326,7 +374,10 @@ def process_bam_once(input_bam, sup_read, min_len, min_mapq, tmp_dir):
     passed_softclip = 0
     fastq_records = 0
 
-    with pysam.AlignmentFile(input_bam, "rb") as bamfile:
+    mode = get_pysam_mode(input_file)
+    file_type = detect_file_type(input_file)
+
+    with pysam.AlignmentFile(input_file, mode) as bamfile:
         with open(combined_fastq, 'w') as fq_out:
             for read in bamfile:
                 total_reads += 1
@@ -596,9 +647,10 @@ def process_read(read, min_len=MIN_SOFTCLIP_LENGTH):
     return read
 
 
-def filter_softclip_reads(input_bam, output_bam, min_len=MIN_SOFTCLIP_LENGTH):
-    """筛选符合要求的SoftClip Reads"""
-    with pysam.AlignmentFile(input_bam, "rb") as bamfile:
+def filter_softclip_reads(input_file, output_bam, min_len=MIN_SOFTCLIP_LENGTH):
+    """筛选符合要求的SoftClip Reads，支持BAM和CRAM格式"""
+    mode = get_pysam_mode(input_file)
+    with pysam.AlignmentFile(input_file, mode) as bamfile:
         with pysam.AlignmentFile(output_bam, "wb", template=bamfile) as outbam:
             for read in bamfile:
                 result = process_read(read, min_len)
@@ -625,10 +677,11 @@ def get_breakpoints(read):
     return breakpoints
 
 
-def count_breakpoints(bam_file):
-    """统计断点信息"""
+def count_breakpoints(input_file):
+    """统计断点信息，支持BAM和CRAM格式"""
     breakpoint_counts = {}
-    with pysam.AlignmentFile(bam_file, "rb") as bamfile:
+    mode = get_pysam_mode(input_file)
+    with pysam.AlignmentFile(input_file, mode) as bamfile:
         for read in bamfile:
             breakpoints = get_breakpoints(read)
             for chrom, pos, read_name in breakpoints:
@@ -644,9 +697,9 @@ def count_breakpoints(bam_file):
     return breakpoint_counts
 
 
-def get_breakpoint_df(input_bam, cutoff=10):
-    """整理断点信息为DataFrame并筛选"""
-    breakpoint_counts = count_breakpoints(input_bam)
+def get_breakpoint_df(input_file, cutoff=10):
+    """整理断点信息为DataFrame并筛选，支持BAM和CRAM格式"""
+    breakpoint_counts = count_breakpoints(input_file)
 
     if not breakpoint_counts:
         return pd.DataFrame(columns=["chrom", "pos", "reads", "reads_name"])
@@ -689,8 +742,8 @@ def get_soft_clipped_parts(read):
     return soft_clipped_parts
 
 
-def split_breakpoint_2_fastq(df, input_bam, tmp_dir):
-    """将断点reads提取为fastq文件（优化：单次遍历BAM）"""
+def split_breakpoint_2_fastq(df, input_file, tmp_dir):
+    """将断点reads提取为fastq文件（优化：单次遍历），支持BAM和CRAM格式"""
     read_to_breakpoints = {}
     breakpoint_files = {}
 
@@ -709,7 +762,8 @@ def split_breakpoint_2_fastq(df, input_bam, tmp_dir):
                 read_to_breakpoints[read_name] = []
             read_to_breakpoints[read_name].append((chrom, pos))
 
-    with pysam.AlignmentFile(input_bam, "rb") as bamfile:
+    mode = get_pysam_mode(input_file)
+    with pysam.AlignmentFile(input_file, mode) as bamfile:
         for read in bamfile:
             if read.query_name in read_to_breakpoints:
                 soft_clipped_parts = get_soft_clipped_parts(read)
@@ -738,10 +792,11 @@ def run_bwa_alignment(bwa, te_reference, fastq, sam, threads=2):
             f.write("@HD\tVN:1.0\n")
 
 
-def split_breakpoint_2_fastq_batch(df, input_bam, tmp_dir):
+def split_breakpoint_2_fastq_batch(df, input_file, tmp_dir):
     """
     将所有断点reads合并为一个fastq文件（批量比对优化）
     read name格式: {original_name}@{chrom}_{pos} 用于回溯断点
+    支持 BAM 和 CRAM 格式
     """
     read_to_breakpoints = {}
 
@@ -757,7 +812,8 @@ def split_breakpoint_2_fastq_batch(df, input_bam, tmp_dir):
 
     combined_fastq = os.path.join(tmp_dir, "combined_breakpoints.fastq")
 
-    with pysam.AlignmentFile(input_bam, "rb") as bamfile:
+    mode = get_pysam_mode(input_file)
+    with pysam.AlignmentFile(input_file, mode) as bamfile:
         with open(combined_fastq, 'w') as fq_out:
             for read in bamfile:
                 if read.query_name in read_to_breakpoints:
@@ -1170,9 +1226,37 @@ def write_vcf_output(df, output_path, sample_id, reference, fasta_handler=None):
 
 # ========== 主流程 ==========
 
-def te_pipe(prefix, input_bam, output_dir, sup_read, min_len,
+def te_pipe(prefix, input_file, output_dir, sup_read, min_len,
             rm_tmp, config_file, n_threads, min_mapq, cluster_window, ref_fasta=None):
-    """主分析流程（v2.0重构版本）"""
+    """
+    主分析流程（v2.0重构版本）
+
+    支持 BAM 和 CRAM 格式输入
+
+    Args:
+        prefix: 样本前缀/标识符
+        input_file: 输入文件路径（BAM或CRAM）
+        output_dir: 输出目录
+        sup_read: 最小支持reads数
+        min_len: 最小softclip长度
+        rm_tmp: 是否删除临时文件
+        config_file: 配置文件路径
+        n_threads: 线程数
+        min_mapq: 最小MAPQ
+        cluster_window: 聚类窗口大小
+        ref_fasta: 参考基因组FASTA文件（用于VCF REF碱基和CRAM解压）
+    """
+
+    # 检测输入文件类型
+    file_type = detect_file_type(input_file)
+    print(f"Input file type: {file_type.upper()}")
+
+    # CRAM文件需要参考基因组
+    if file_type == "cram" and ref_fasta is None:
+        print("Warning: CRAM files require a reference genome for decoding.")
+        print("         Please provide reference FASTA via -r/--ref_fasta option.")
+        print("         Alternatively, ensure REF_PATH environment variable is set.")
+        # 尝试继续处理，pysam可能通过其他方式找到参考基因组
 
     # 确定参考基因组名称和加载FASTA
     fasta_handler = None
@@ -1196,8 +1280,8 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len,
             print("Warning: pyfaidx not installed. REF bases will be 'N'.")
             print("         Install with: pip install pyfaidx")
     else:
-        # 从BAM header获取参考基因组信息
-        reference, has_chr, suggestion = get_reference_info(input_bam)
+        # 从BAM/CRAM header获取参考基因组信息
+        reference, has_chr, suggestion = get_reference_info(input_file)
         print(f"Reference: {suggestion}")
         if reference == 'unknown':
             print("         VCF header will use 'unknown'. Use -r to specify reference FASTA.")
@@ -1223,8 +1307,8 @@ def te_pipe(prefix, input_bam, output_dir, sup_read, min_len,
     output_vcf = os.path.join(output_dir, prefix + ".te.result.vcf")
 
     # Step 1-3: 合并处理（筛选 + 统计断点 + 写FASTQ）
-    print("Step 1: Processing BAM (filter + count breakpoints + write FASTQ)...")
-    df, combined_fastq = process_bam_once(input_bam, sup_read, min_len, min_mapq, tmp_dir)
+    print("Step 1: Processing {} (filter + count breakpoints + write FASTQ)...".format(file_type.upper()))
+    df, combined_fastq = process_bam_once(input_file, sup_read, min_len, min_mapq, tmp_dir)
 
     if df.empty:
         print("No breakpoints found after filtering.")
@@ -1293,18 +1377,19 @@ def main():
         prog="TIEA-WES.py",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("-v", "--version", action="version", version="Version 2.0.0")
+    parser.add_argument("-v", "--version", action="version", version="Version 2.0.1")
     parser.add_argument("-p", "--prefix", type=str, required=True,
                         help="Sample prefix/identifier")
     parser.add_argument("-i", "--input", type=str, required=True,
-                        help="Input BAM file path")
+                        help="Input alignment file path (BAM or CRAM format)")
     parser.add_argument("-o", "--output", type=str, required=True,
                         help="Output directory path")
     parser.add_argument("-r", "--ref_fasta", type=str, default=None,
-                        help="Reference genome FASTA file (optional)\n"
+                        help="Reference genome FASTA file (optional but recommended for CRAM)\n"
                              "  - Provides real REF bases in VCF\n"
                              "  - Sets reference name in VCF header\n"
-                             "  - Auto-detected from BAM header if not provided")
+                             "  - Required for CRAM file decoding (unless REF_PATH is set)\n"
+                             "  - Auto-detected from BAM/CRAM header if not provided")
     parser.add_argument("-s", "--support_reads", type=int, default=10,
                         help="Minimum breakpoint support reads cutoff (default: 10)")
     parser.add_argument("-l", "--min_length", type=int, default=36,
@@ -1328,7 +1413,7 @@ def main():
 
     te_pipe(
         prefix=args.prefix,
-        input_bam=args.input,
+        input_file=args.input,
         output_dir=args.output,
         sup_read=args.support_reads,
         min_len=args.min_length,

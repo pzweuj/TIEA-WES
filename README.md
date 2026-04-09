@@ -12,6 +12,9 @@
 > - Pipeline BWA output parsing (no intermediate files)
 > - Simplified parameters (reference auto-detected from BAM)
 > - VCF-only output format
+>
+> **v2.0.1 adds:**
+> - **CRAM format support** - Now accepts both BAM and CRAM input files
 
 ## Overview
 
@@ -90,6 +93,10 @@ docker build -t tiea-wes:2.0 .
 docker run --rm -v /path/to/data:/data tiea-wes:2.0 \
     python /app/TIEA-WES.py -p sample -i /data/sample.bam -o /data/output
 
+# CRAM file input (requires reference genome)
+docker run --rm -v /path/to/data:/data -v /path/to/ref:/ref tiea-wes:2.0 \
+    python /app/TIEA-WES.py -p sample -i /data/sample.cram -o /data/output -r /ref/hg38.fa
+
 # With reference genome FASTA (for real REF bases and correct header)
 docker run --rm -v /path/to/data:/data -v /path/to/ref:/ref tiea-wes:2.0 \
     python /app/TIEA-WES.py -p sample -i /data/sample.bam -o /data/output -r /ref/hg19.fa
@@ -117,21 +124,29 @@ docker run -it --rm -v /path/to/data:/data tiea-wes:2.0 bash
 ### Basic usage
 
 ```bash
+# BAM file input
 python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir>
+
+# CRAM file input (requires reference genome for decoding)
+python TIEA-WES.py -p <sample_id> -i <sample.cram> -o <output_dir> -r <reference.fa>
 ```
 
 ### With explicit reference
 
 ```bash
-python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir> -f <ref.fa>
+python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir> -r <ref.fa>
 ```
+
+**Note for CRAM files:** CRAM format requires a reference genome for decoding. You must either:
+1. Provide the reference FASTA via `-r` parameter
+2. Set the `REF_PATH` environment variable to point to the reference directory
 
 ### Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `-p` | Sample prefix/identifier | Required |
-| `-i` | Input BAM file | Required |
+| `-i` | Input alignment file (BAM or CRAM) | Required |
 | `-o` | Output directory | Required |
 | `-r` | Reference genome FASTA file | None |
 | `-s` | Minimum breakpoint support reads | 10 |
@@ -145,7 +160,8 @@ python TIEA-WES.py -p <sample_id> -i <sample.bam> -o <output_dir> -f <ref.fa>
 **The `-r` parameter:**
 - Provides real REF bases in VCF output
 - Sets reference name in VCF header (extracted from filename)
-- If not provided, REF will be 'N' and reference name is auto-detected from BAM header
+- If not provided, REF will be 'N' and reference name is auto-detected from BAM/CRAM header
+- **Required for CRAM files** (unless `REF_PATH` environment variable is set)
 
 ## Algorithm Improvements (v2.0)
 
