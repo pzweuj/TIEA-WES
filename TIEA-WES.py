@@ -230,7 +230,7 @@ def get_reference_info(input_file):
         has_chr_prefix = any(sn.startswith('chr') for sn in sn_list if sn)
 
         # 获取参考基因组名称
-        reference = get_reference_from_bam(bam_file)
+        reference = get_reference_from_bam(input_file)
 
         # 生成建议
         if reference != 'unknown':
